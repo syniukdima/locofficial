@@ -11,6 +11,12 @@ export default defineConfig({
         secure: false,
         ws: true,
       },
+      '/ws': {
+        target: 'ws://locofficial.fly.dev',
+        changeOrigin: true,
+        ws: true,
+        rewrite: (path) => path.replace(/^\/ws/, '/ws'),
+      },
     },
     hmr: {
       clientPort: 443,
