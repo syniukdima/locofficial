@@ -97,9 +97,23 @@ function connectWs() {
   };
 
   ws.onclose = (ev) => {
-    console.log('[WS] Closed', { code: ev.code, reason: ev.reason });
+    const closeReasons = {
+      1000: 'Normal closure',
+      1001: 'Going away',
+      1002: 'Protocol error',
+      1003: 'Unsupported data',
+      1006: 'Abnormal closure (no close frame)',
+      1007: 'Invalid frame payload',
+      1008: 'Policy violation',
+      1009: 'Message too big',
+      1010: 'Missing extension',
+      1011: 'Internal error',
+      1015: 'TLS handshake failure'
+    };
+    const reasonText = closeReasons[ev.code] || 'Unknown';
+    console.log('[WS] Closed', { code: ev.code, reason: ev.reason || reasonText, wasClean: ev.wasClean });
     updateWsStatus('closed');
-    appendLog({ type: 'closed', code: ev.code, reason: ev.reason });
+    appendLog({ type: 'closed', code: ev.code, reason: ev.reason || reasonText });
     // lightweight reconnect
     setTimeout(() => {
       updateWsStatus('reconnecting');
@@ -109,6 +123,8 @@ function connectWs() {
 
   ws.onerror = (ev) => {
     console.error('[WS] Error event', ev);
+    console.error('[WS] WebSocket state:', ws.readyState);
+    console.error('[WS] URL:', ws.url);
     updateWsStatus('error');
     appendLog({ type: 'error', event: ev?.message || 'ws error' });
   };
