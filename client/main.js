@@ -4,10 +4,8 @@ import { DiscordSDK, patchUrlMappings } from "@discord/embedded-app-sdk";
 import "./style.css";
 import rocketLogo from '/rocket.png';
 
-// Patch URL mappings for WebSocket proxy (production only)
-if (import.meta.env.PROD) {
-  patchUrlMappings([{prefix: '/ws', target: 'locofficial.fly.dev'}]);
-}
+// Patch URL mappings for WebSocket proxy
+patchUrlMappings([{prefix: '/ws', target: 'locofficial.fly.dev'}]);
 
 // Instantiate the SDK
 const discordSdk = new DiscordSDK(import.meta.env.VITE_DISCORD_CLIENT_ID);
