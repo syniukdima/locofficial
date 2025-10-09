@@ -158,19 +158,53 @@ async function setupDiscordSdk() {
     await discordSdk.ready();
     console.log("✅ Discord SDK готовий!");
     
-    // Log Discord context info
-    const auth = await discordSdk.commands.authenticate({ access_token: null }).catch(() => null);
-    if (auth) {
-      console.log('👤 User:', auth.user?.username);
+    // IMPORTANT: Must authenticate before external network requests!
+    console.log('🔐 Авторизація користувача...');
+    
+    // Exchange code for access token via your backend
+    const { code } = await discordSdk.commands.authorize({
+      client_id: import.meta.env.VITE_DISCORD_CLIENT_ID,
+      response_type: "code",
+      state: "",
+      prompt: "none",
+      scope: ["identify", "guilds"],
+    });
+    
+    console.log('📝 Отримано код авторизації:', code?.substring(0, 10) + '...');
+    
+    // Exchange code for token via your serverless function
+    const response = await fetch("/api/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Token exchange failed: ${errorData.error || response.statusText}`);
     }
     
-    const sdkBadge = document.getElementById('sdk-badge');
-    if (sdkBadge) sdkBadge.textContent = 'SDK ready';
+    const { access_token } = await response.json();
     
-    // Connect WS after SDK is ready (Discord iframe policies)
+    if (!access_token) {
+      throw new Error('No access_token in response');
+    }
+    
+    console.log('🎟️ Отримано access token');
+    
+    // Authenticate with Discord SDK
+    const auth = await discordSdk.commands.authenticate({ access_token });
+    console.log('👤 Авторизовано:', auth.user.username, '#' + auth.user.discriminator);
+    
+    const sdkBadge = document.getElementById('sdk-badge');
+    if (sdkBadge) sdkBadge.textContent = `SDK ready — ${auth.user.username}`;
+    
+    // NOW we can connect to external WebSocket!
+    console.log('🔓 Авторизація завершена, підключаємось до WS...');
     connectWs();
   } catch (error) {
     console.error('❌ Помилка Discord SDK:', error);
+    appendLog('Помилка авторизації: ' + error.message);
   }
 }
 
@@ -198,6 +232,20 @@ document.querySelector('#app').innerHTML = `
 wsStatusEl = document.getElementById('ws-status');
 const wsUrlEl = document.getElementById('ws-url');
 if (wsUrlEl) wsUrlEl.textContent = wsUrl || '(not set)';
+
+// Catch CSP violations and other security errors
+window.addEventListener('securitypolicyviolation', (e) => {
+  console.error('🚨 CSP Violation!', {
+    blockedURI: e.blockedURI,
+    violatedDirective: e.violatedDirective,
+    originalPolicy: e.originalPolicy
+  });
+});
+
+// Catch all unhandled errors
+window.addEventListener('error', (e) => {
+  console.error('❌ Global error:', e.message, e.error);
+});
 
 // Initial log message
 console.log('🚀 Клієнт запустився');
