@@ -56,7 +56,8 @@ console.warn = function(...args) {
 
 let ws;
 let wsStatusEl;
-let wsUrl = import.meta.env.VITE_REALTIME_URL;
+// Always use relative path - Discord will proxy to your backend via URL Mappings
+let wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
 
 function connectWs() {
   // Debug logging
@@ -249,7 +250,7 @@ window.addEventListener('error', (e) => {
 
 // Initial log message
 console.log('🚀 Клієнт запустився');
-console.log('VITE_REALTIME_URL:', wsUrl || 'НЕ ЗАДАНО');
+console.log('WebSocket URL:', wsUrl);
 console.log('CLIENT_ID:', import.meta.env.VITE_DISCORD_CLIENT_ID || 'НЕ ЗАДАНО');
 
 setupDiscordSdk();

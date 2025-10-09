@@ -6,8 +6,8 @@ export default async function handler(req, res) {
 
   try {
     // Try both with and without VITE_ prefix (Vercel compatibility)
-    const clientId = process.env.DISCORD_CLIENT_ID || process.env.VITE_DISCORD_CLIENT_ID;
-    const clientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.VITE_DISCORD_CLIENT_SECRET;
+    const clientId = process.env.VITE_DISCORD_CLIENT_ID;
+    const clientSecret = process.env.VITE_DISCORD_CLIENT_SECRET;
     const body = typeof req.body === "string" ? safeJsonParse(req.body) : req.body;
     const code = body?.code;
 
