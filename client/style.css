@@ -74,6 +74,39 @@ button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
 
+.players-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.player-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  border: 1px solid #333;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.03);
+}
+
+.avatar {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #111;
+  border: 1px solid #444;
+}
+
+.player-name {
+  margin-top: 8px;
+  font-size: 14px;
+  opacity: .9;
+}
+
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;

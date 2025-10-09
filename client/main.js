@@ -15,76 +15,47 @@ function generateRequestId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
-// Basic logger
-function appendLog(message, type = 'info') {
-  const el = document.getElementById('log');
-  if (!el) return;
-  const line = document.createElement('div');
-  
-  // Add styling based on type
-  if (type === 'error') {
-    line.style.color = '#ff6b6b';
-  } else if (type === 'warn') {
-    line.style.color = '#ffd93d';
-  } else if (type === 'success') {
-    line.style.color = '#6bcf7f';
-  }
-  
-  const timestamp = new Date().toLocaleTimeString('uk-UA');
-  const prefix = `[${timestamp}] `;
-  line.textContent = prefix + (typeof message === 'string' ? message : JSON.stringify(message));
-  el.appendChild(line);
-  el.scrollTop = el.scrollHeight;
+// UI helpers
+function renderPlayers(state) {
+  const container = document.getElementById('players');
+  const roomLabel = document.getElementById('room-label');
+  if (!container) return;
+  const players = Array.isArray(state?.players) ? state.players : [];
+  if (roomLabel) roomLabel.textContent = state?.roomId ? `Room: ${state.roomId}` : '';
+  container.innerHTML = players.map((p) => {
+    const name = [p?.username, p?.discriminator && p.discriminator !== '0' ? `#${p.discriminator}` : '']
+      .filter(Boolean).join(' ');
+    const avatar = p?.avatarUrl || '';
+    return (
+      `<div class="player-card">` +
+        `<img class="avatar" src="${avatar}" alt="${name}" />` +
+        `<div class="player-name">${name || 'Unknown'}</div>` +
+      `</div>`
+    );
+  }).join('');
 }
-
-// Intercept console methods to show in UI
-const originalConsoleLog = console.log;
-const originalConsoleError = console.error;
-const originalConsoleWarn = console.warn;
-
-console.log = function(...args) {
-  originalConsoleLog.apply(console, args);
-  appendLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'info');
-};
-
-console.error = function(...args) {
-  originalConsoleError.apply(console, args);
-  appendLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'error');
-};
-
-console.warn = function(...args) {
-  originalConsoleWarn.apply(console, args);
-  appendLog(args.map(a => typeof a === 'object' ? JSON.stringify(a) : a).join(' '), 'warn');
-};
 
 let ws;
 let wsStatusEl;
 // Prefer explicit env URL if provided, fallback to Discord-mapped relative path
 let wsUrl = import.meta.env.VITE_REALTIME_URL || '/ws';
+let currentProfile = null;
 
 function connectWs() {
-  // Debug logging
-  console.log('[WS] Attempting connection...', { 
-    wsUrl, 
-    allEnv: import.meta.env,
-    origin: window.location.origin
-  });
+  console.log('[WS] Attempting connection...', { wsUrl, origin: window.location.origin });
   
   if (!wsUrl) {
     const msg = "VITE_REALTIME_URL не задано";
     console.error('[WS]', msg);
-    appendLog(msg);
     updateWsStatus('missing-url');
     return;
   }
   try {
     console.log('[WS] Creating WebSocket:', wsUrl);
-    appendLog({ connecting: wsUrl });
     ws = new WebSocket(wsUrl);
   } catch (e) {
     const msg = `WS error: ${e?.message || e}`;
     console.error('[WS]', msg, e);
-    appendLog(msg);
     updateWsStatus('error');
     return;
   }
@@ -92,12 +63,21 @@ function connectWs() {
   ws.onopen = () => {
     console.log('[WS] Connected!');
     updateWsStatus('connected');
-    appendLog({ type: 'connected', url: wsUrl });
   };
 
   ws.onmessage = (ev) => {
-    console.log('[WS] Message:', ev.data);
-    appendLog({ inbound: ev.data });
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg?.type === 'room_update' && msg?.data) {
+        renderPlayers(msg.data);
+      } else if (msg?.type === 'joined' || msg?.type === 'room_created') {
+        if (currentProfile) {
+          send('identify', currentProfile);
+        }
+      }
+    } catch {
+      // non-JSON messages
+    }
   };
 
   ws.onclose = (ev) => {
@@ -117,7 +97,6 @@ function connectWs() {
     const reasonText = closeReasons[ev.code] || 'Unknown';
     console.log('[WS] Closed', { code: ev.code, reason: ev.reason || reasonText, wasClean: ev.wasClean });
     updateWsStatus('closed');
-    appendLog({ type: 'closed', code: ev.code, reason: ev.reason || reasonText });
     
     // Don't reconnect on 1006 - likely misconfiguration
     if (ev.code === 1006) {
@@ -138,7 +117,6 @@ function connectWs() {
     console.error('[WS] WebSocket state:', ws.readyState);
     console.error('[WS] URL:', ws.url);
     updateWsStatus('error');
-    appendLog({ type: 'error', event: ev?.message || 'ws error' });
   };
 }
 
@@ -156,12 +134,11 @@ function updateWsStatus(state) {
 
 function send(type, data) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    appendLog('WS not connected');
+    console.warn('WS not connected');
     return;
   }
   const requestId = generateRequestId();
   ws.send(JSON.stringify({ type, requestId, data }));
-  appendLog({ outbound: { type, requestId, data } });
 }
 
 async function setupDiscordSdk() {
@@ -207,6 +184,18 @@ async function setupDiscordSdk() {
     // Authenticate with Discord SDK
     const auth = await discordSdk.commands.authenticate({ access_token });
     console.log('👤 Авторизовано:', auth.user.username, '#' + auth.user.discriminator);
+
+    // Prepare profile for identify
+    const user = auth.user;
+    const avatarUrl = user.avatar
+      ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`
+      : `https://cdn.discordapp.com/embed/avatars/${Number(user.discriminator || 0) % 5}.png`;
+    currentProfile = {
+      id: user.id,
+      username: user.username,
+      discriminator: String(user.discriminator ?? '0'),
+      avatarUrl,
+    };
     
     const sdkBadge = document.getElementById('sdk-badge');
     if (sdkBadge) sdkBadge.textContent = `SDK ready — ${auth.user.username}`;
@@ -216,7 +205,6 @@ async function setupDiscordSdk() {
     connectWs();
   } catch (error) {
     console.error('❌ Помилка Discord SDK:', error);
-    appendLog('Помилка авторизації: ' + error.message);
   }
 }
 
@@ -237,7 +225,8 @@ document.querySelector('#app').innerHTML = `
         <button id="ping">Ping</button>
       </div>
     </div>
-    <div id="log" style="height: 300px; overflow:auto; border:1px solid #444; padding:8px; border-radius:6px; font-family: monospace; font-size: 12px; background: #1a1a1a;"></div>
+    <div id="room-label" style="margin: 12px 0; font-size: 14px; opacity: .8;"></div>
+    <div id="players" class="players-grid"></div>
   </div>
 `;
 
@@ -264,10 +253,7 @@ console.log('🚀 Клієнт запустився');
 console.log('WebSocket URL:', wsUrl);
 console.log('CLIENT_ID:', import.meta.env.VITE_DISCORD_CLIENT_ID || 'НЕ ЗАДАНО');
 
-// Test if URL mapping works with simple HTTP request
-fetch('/ws')
-  .then(r => console.log('✅ HTTP test через /ws:', r.status, r.statusText))
-  .catch(e => console.error('❌ HTTP test через /ws:', e.message));
+// No-op HTTP test removed
 
 setupDiscordSdk();
 

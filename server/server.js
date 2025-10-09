@@ -57,6 +57,22 @@ const wss = new WebSocketServer({ server, path: "/ws" });
 // In-memory rooms and connections
 const rooms = new Map(); // roomId -> { players: Set<socket>, createdAt: number }
 
+function getRoomState(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return { roomId, players: [] };
+  const players = [];
+  for (const s of room.players) {
+    const p = s.__profile || {};
+    players.push({
+      id: p.id || null,
+      username: p.username || null,
+      discriminator: p.discriminator || null,
+      avatarUrl: p.avatarUrl || null,
+    });
+  }
+  return { roomId, players };
+}
+
 function send(socket, message) {
   if (socket.readyState === 1) {
     socket.send(JSON.stringify(message));
@@ -103,6 +119,8 @@ wss.on("connection", (socket, req) => {
       rooms.set(roomId, { players: new Set([socket]), createdAt: Date.now() });
       socket.__roomId = roomId;
       send(socket, { type: "room_created", requestId, data: { roomId } });
+      const state = getRoomState(roomId);
+      broadcast(roomId, { type: "room_update", data: state });
       return;
     }
 
@@ -117,7 +135,8 @@ wss.on("connection", (socket, req) => {
       room.players.add(socket);
       socket.__roomId = roomId;
       send(socket, { type: "joined", requestId, data: { roomId } });
-      broadcast(roomId, { type: "room_update", data: { roomId, players: room.players.size } });
+      const state = getRoomState(roomId);
+      broadcast(roomId, { type: "room_update", data: state });
       return;
     }
 
@@ -130,7 +149,28 @@ wss.on("connection", (socket, req) => {
         delete socket.__roomId;
         send(socket, { type: "left", requestId, data: { roomId } });
         if (room.players.size === 0) rooms.delete(roomId);
-        else broadcast(roomId, { type: "room_update", data: { roomId, players: room.players.size } });
+        else {
+          const state = getRoomState(roomId);
+          broadcast(roomId, { type: "room_update", data: state });
+        }
+      }
+      return;
+    }
+
+    // Identify: store user profile on socket and broadcast state
+    if (type === "identify") {
+      const profile = data && typeof data === 'object' ? data : {};
+      socket.__profile = {
+        id: profile.id || null,
+        username: profile.username || null,
+        discriminator: profile.discriminator || null,
+        avatarUrl: profile.avatarUrl || null,
+      };
+      send(socket, { type: "identify_ack", requestId });
+      const roomId = socket.__roomId;
+      if (roomId && rooms.has(roomId)) {
+        const state = getRoomState(roomId);
+        broadcast(roomId, { type: "room_update", data: state });
       }
       return;
     }
