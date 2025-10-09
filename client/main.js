@@ -33,6 +33,7 @@ function connectWs() {
     return;
   }
   try {
+    appendLog({ connecting: wsUrl });
     ws = new WebSocket(wsUrl);
   } catch (e) {
     appendLog(`WS error: ${e?.message || e}`);
@@ -59,8 +60,9 @@ function connectWs() {
     }, 1500);
   };
 
-  ws.onerror = () => {
+  ws.onerror = (ev) => {
     updateWsStatus('error');
+    appendLog({ type: 'error', event: ev?.message || 'ws error' });
   };
 }
 
@@ -101,6 +103,7 @@ document.querySelector('#app').innerHTML = `
     <div id="sdk-badge" style="margin: 4px 0; font-size: 12px; opacity: .8;">SDK initializing…</div>
     <div style="margin: 8px 0;">
       <div>WS: <span id="ws-status">Connecting…</span></div>
+      <div style="font-size:12px; opacity:.8;">URL: <code id="ws-url"></code></div>
       <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
         <input id="room-id" placeholder="Room ID" style="padding:6px;" />
         <button id="create-room">Create</button>
@@ -114,6 +117,8 @@ document.querySelector('#app').innerHTML = `
 `;
 
 wsStatusEl = document.getElementById('ws-status');
+const wsUrlEl = document.getElementById('ws-url');
+if (wsUrlEl) wsUrlEl.textContent = wsUrl || '(not set)';
 setupDiscordSdk();
 connectWs();
 

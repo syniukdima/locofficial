@@ -43,6 +43,7 @@ wss.on("connection", (socket, req) => {
     socket.close(1008, "origin not allowed");
     return;
   }
+  console.log("WS connection", { origin });
 
   send(socket, { type: "hello", message: "connected", now: Date.now() });
 
@@ -108,6 +109,16 @@ wss.on("connection", (socket, req) => {
 
     // Unknown
     send(socket, { type: "error", requestId, error: "unknown_type", received: type });
+  });
+  socket.on("close", (code, reason) => {
+    console.log("WS close", { code, reason: reason?.toString?.() || "" });
+    const roomId = socket.__roomId;
+    if (roomId && rooms.has(roomId)) {
+      const room = rooms.get(roomId);
+      room.players.delete(socket);
+      if (room.players.size === 0) rooms.delete(roomId);
+      else broadcast(roomId, { type: "room_update", data: { roomId, players: room.players.size } });
+    }
   });
 });
 
