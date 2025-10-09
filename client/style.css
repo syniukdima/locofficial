@@ -107,6 +107,48 @@ button:focus-visible {
   opacity: .9;
 }
 
+.hand-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.card-slot {
+  width: 80px;
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed #444;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.02);
+}
+
+.card {
+  width: 80px;
+  height: 120px;
+  border-radius: 10px;
+  border: 2px solid #333;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+.card .card-value { font-size: 36px; }
+.card.R { background: #ff4d4f22; border-color: #ff4d4f55; }
+.card.G { background: #52c41a22; border-color: #52c41a55; }
+.card.B { background: #1677ff22; border-color: #1677ff55; }
+.card.Y { background: #fadb1422; border-color: #fadb1455; }
+.card.placeholder { opacity: .5; }
+
+button.card {
+  cursor: pointer;
+  border: none;
+}
+button.card.disabled { cursor: not-allowed; opacity: .5; }
+button.card.playable { box-shadow: 0 0 0 2px #646cffaa inset; }
+
 @media (prefers-color-scheme: light) {
   :root {
     color: #213547;

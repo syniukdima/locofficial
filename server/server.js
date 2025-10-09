@@ -55,7 +55,86 @@ const port = process.env.PORT || 8080;
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 // In-memory rooms and connections
-const rooms = new Map(); // roomId -> { players: Set<socket>, createdAt: number }
+const rooms = new Map(); // roomId -> { players: Set<socket>, createdAt: number, game?: UnoGame }
+
+// UNO helpers
+const COLORS = ["R", "G", "B", "Y"]; // red, green, blue, yellow
+
+function createDeck() {
+  /** @type {{ color: string, value: number }[]} */
+  const deck = [];
+  for (const color of COLORS) {
+    deck.push({ color, value: 0 }); // one zero per color
+    for (let v = 1; v <= 9; v++) {
+      deck.push({ color, value: v });
+      deck.push({ color, value: v });
+    }
+  }
+  return deck;
+}
+
+function shuffleInPlace(array) {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = array[i];
+    array[i] = array[j];
+    array[j] = tmp;
+  }
+  return array;
+}
+
+function cardEquals(a, b) {
+  return a && b && a.color === b.color && a.value === b.value;
+}
+
+function canPlay(card, top) {
+  if (!card || !top) return false;
+  return card.color === top.color || card.value === top.value;
+}
+
+function getPlayerId(socket) {
+  return socket?.__profile?.id || `anon-${(socket?._socket?.remoteAddress || "").replace(/[:.]/g, "")}`;
+}
+
+function ensureGame(room) {
+  if (!room.game) {
+    room.game = {
+      phase: "lobby",
+      playersOrder: [],
+      hands: new Map(), // playerId -> Card[]
+      drawPile: [],
+      discardTop: null,
+      currentTurnIndex: 0,
+    };
+  }
+  return room.game;
+}
+
+function buildPublicState(room) {
+  const state = getRoomState(room?.id || "");
+  if (room?.game) {
+    state.topCard = room.game.discardTop;
+    state.currentPlayerId = room.game.playersOrder[room.game.currentTurnIndex] || null;
+    // add cards count per player
+    state.players = state.players.map(p => ({
+      ...p,
+      cards: room.game.hands.get(p.id)?.length || 0,
+    }));
+    state.phase = room.game.phase;
+  }
+  return state;
+}
+
+function buildPrivateSnapshot(room, playerId) {
+  const pub = buildPublicState(room);
+  return {
+    type: "snapshot",
+    data: {
+      ...pub,
+      yourHand: room?.game?.hands.get(playerId) || [],
+    }
+  };
+}
 
 function getRoomState(roomId) {
   const room = rooms.get(roomId);
@@ -116,7 +195,7 @@ wss.on("connection", (socket, req) => {
     // Create room
     if (type === "create_room") {
       const roomId = createRoomId();
-      rooms.set(roomId, { players: new Set([socket]), createdAt: Date.now() });
+      rooms.set(roomId, { players: new Set([socket]), createdAt: Date.now(), id: roomId });
       socket.__roomId = roomId;
       send(socket, { type: "room_created", requestId, data: { roomId } });
       const state = getRoomState(roomId);
@@ -130,6 +209,11 @@ wss.on("connection", (socket, req) => {
       const room = rooms.get(roomId);
       if (!room) {
         send(socket, { type: "error", requestId, error: "room_not_found" });
+        return;
+      }
+      // deny join when a game is in progress
+      if (room.game && room.game.phase === "playing") {
+        send(socket, { type: "error", requestId, error: "game_in_progress" });
         return;
       }
       room.players.add(socket);
@@ -150,6 +234,24 @@ wss.on("connection", (socket, req) => {
         send(socket, { type: "left", requestId, data: { roomId } });
         if (room.players.size === 0) rooms.delete(roomId);
         else {
+          // if playing, remove from order and adjust turn
+          if (room.game && room.game.phase === "playing") {
+            const departingId = getPlayerId(socket);
+            const idx = room.game.playersOrder.indexOf(departingId);
+            if (idx >= 0) {
+              room.game.playersOrder.splice(idx, 1);
+              room.game.hands.delete(departingId);
+              if (room.game.currentTurnIndex >= room.game.playersOrder.length) {
+                room.game.currentTurnIndex = 0;
+              }
+              // if only one left, winner
+              if (room.game.playersOrder.length <= 1) {
+                const winner = room.game.playersOrder[0] || null;
+                broadcast(roomId, { type: "winner", data: { playerId: winner } });
+                room.game.phase = "ended";
+              }
+            }
+          }
           const state = getRoomState(roomId);
           broadcast(roomId, { type: "room_update", data: state });
         }
@@ -172,6 +274,120 @@ wss.on("connection", (socket, req) => {
         const state = getRoomState(roomId);
         broadcast(roomId, { type: "room_update", data: state });
       }
+      return;
+    }
+
+    // === UNO GAME HANDLERS ===
+    if (type === "start") {
+      const roomId = socket.__roomId;
+      const room = roomId && rooms.get(roomId);
+      if (!room) { send(socket, { type: "error", requestId, error: "not_in_room" }); return; }
+      if (room.players.size < 2) { send(socket, { type: "error", requestId, error: "need_2_players" }); return; }
+
+      const game = ensureGame(room);
+      if (game.phase === "playing") { send(socket, { type: "error", requestId, error: "already_started" }); return; }
+
+      game.phase = "playing";
+      // order based on current players
+      game.playersOrder = Array.from(room.players).map(s => getPlayerId(s));
+      game.hands = new Map();
+      game.drawPile = shuffleInPlace(createDeck());
+      game.discardTop = null;
+      game.currentTurnIndex = 0;
+
+      // deal 7 to each
+      for (const pid of game.playersOrder) {
+        game.hands.set(pid, []);
+      }
+      for (let i = 0; i < 7; i++) {
+        for (const pid of game.playersOrder) {
+          const card = game.drawPile.pop();
+          if (card) game.hands.get(pid).push(card);
+        }
+      }
+      // flip first discard (our deck is numeric-only)
+      game.discardTop = game.drawPile.pop();
+
+      // send snapshots to each player
+      for (const s of room.players) {
+        send(s, buildPrivateSnapshot(room, getPlayerId(s)));
+      }
+      // broadcast public state
+      broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
+      return;
+    }
+
+    if (type === "play") {
+      const roomId = socket.__roomId;
+      const room = roomId && rooms.get(roomId);
+      if (!room || !room.game || room.game.phase !== "playing") { send(socket, { type: "error", requestId, error: "not_playing" }); return; }
+      const pid = getPlayerId(socket);
+      const game = room.game;
+      if (game.playersOrder[game.currentTurnIndex] !== pid) { send(socket, { type: "error", requestId, error: "not_your_turn" }); return; }
+      const card = data && data.card;
+      if (!card || typeof card.color !== 'string' || typeof card.value !== 'number') { send(socket, { type: "error", requestId, error: "invalid_card" }); return; }
+      const hand = game.hands.get(pid) || [];
+      const idx = hand.findIndex(c => cardEquals(c, card));
+      if (idx < 0) { send(socket, { type: "error", requestId, error: "card_not_in_hand" }); return; }
+      if (!canPlay(card, game.discardTop)) { send(socket, { type: "error", requestId, error: "illegal_move" }); return; }
+
+      // play the card
+      hand.splice(idx, 1);
+      game.discardTop = card;
+
+      // winner check
+      if (hand.length === 0) {
+        broadcast(roomId, { type: "winner", data: { playerId: pid } });
+        game.phase = "ended";
+      } else {
+        // advance turn
+        game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playersOrder.length;
+      }
+
+      // notify
+      for (const s of room.players) {
+        send(s, buildPrivateSnapshot(room, getPlayerId(s)));
+      }
+      broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
+      return;
+    }
+
+    if (type === "draw") {
+      const roomId = socket.__roomId;
+      const room = roomId && rooms.get(roomId);
+      if (!room || !room.game || room.game.phase !== "playing") { send(socket, { type: "error", requestId, error: "not_playing" }); return; }
+      const pid = getPlayerId(socket);
+      const game = room.game;
+      if (game.playersOrder[game.currentTurnIndex] !== pid) { send(socket, { type: "error", requestId, error: "not_your_turn" }); return; }
+
+      // if draw pile empty, try to regenerate from discard (minus top). Minimal implementation: error if empty
+      if (game.drawPile.length === 0) { send(socket, { type: "error", requestId, error: "no_cards_to_draw" }); return; }
+      const card = game.drawPile.pop();
+      const hand = game.hands.get(pid) || [];
+      hand.push(card);
+
+      // send updated snapshots/public
+      for (const s of room.players) {
+        send(s, buildPrivateSnapshot(room, getPlayerId(s)));
+      }
+      broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
+      return;
+    }
+
+    if (type === "pass") {
+      const roomId = socket.__roomId;
+      const room = roomId && rooms.get(roomId);
+      if (!room || !room.game || room.game.phase !== "playing") { send(socket, { type: "error", requestId, error: "not_playing" }); return; }
+      const pid = getPlayerId(socket);
+      const game = room.game;
+      if (game.playersOrder[game.currentTurnIndex] !== pid) { send(socket, { type: "error", requestId, error: "not_your_turn" }); return; }
+      // advance turn
+      game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playersOrder.length;
+
+      for (const s of room.players) {
+        send(s, buildPrivateSnapshot(room, getPlayerId(s)));
+      }
+      broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
       return;
     }
 

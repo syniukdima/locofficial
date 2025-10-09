@@ -40,6 +40,63 @@ let wsStatusEl;
 // Prefer explicit env URL if provided, fallback to Discord-mapped relative path
 let wsUrl = import.meta.env.VITE_REALTIME_URL || '/ws';
 let currentProfile = null;
+let yourId = null;
+let gamePublic = {};
+let yourHand = [];
+
+function canPlayClient(card, topCard) {
+  if (!card || !topCard) return false;
+  return card.color === topCard.color || card.value === topCard.value;
+}
+
+function renderTable() {
+  const topEl = document.getElementById('top-card');
+  const turnEl = document.getElementById('turn-indicator');
+  const handEl = document.getElementById('your-hand');
+  const playersCountEl = document.getElementById('players-count');
+  if (playersCountEl && Array.isArray(gamePublic.players)) {
+    playersCountEl.textContent = `Players: ${gamePublic.players.length}`;
+  }
+
+  // Top card
+  if (topEl) {
+    const c = gamePublic.topCard;
+    if (c) {
+      topEl.innerHTML = `<div class="card ${c.color}"><span class="card-value">${c.value}</span></div>`;
+    } else {
+      topEl.innerHTML = `<div class="card placeholder"><span class="card-value">?</span></div>`;
+    }
+  }
+
+  // Turn indicator
+  if (turnEl) {
+    const you = yourId && gamePublic.currentPlayerId === yourId;
+    const who = gamePublic.currentPlayerId || '';
+    turnEl.textContent = gamePublic.phase === 'playing'
+      ? (you ? 'Your turn' : `Turn: ${who}`)
+      : (gamePublic.phase === 'ended' ? 'Game ended' : 'Lobby');
+  }
+
+  // Your hand
+  if (handEl) {
+    const top = gamePublic.topCard;
+    handEl.innerHTML = yourHand.map((c, idx) => {
+      const playable = canPlayClient(c, top);
+      const cls = `card ${c.color} ${playable ? 'playable' : 'disabled'}`;
+      const data = encodeURIComponent(JSON.stringify(c));
+      return `<button class="${cls}" data-card="${data}" title="${c.color}${c.value}"><span class="card-value">${c.value}</span></button>`;
+    }).join('');
+    // attach handlers
+    Array.from(handEl.querySelectorAll('button.card.playable')).forEach(btn => {
+      btn.addEventListener('click', () => {
+        try {
+          const c = JSON.parse(decodeURIComponent(btn.getAttribute('data-card')));
+          send('play', { card: c });
+        } catch {}
+      });
+    });
+  }
+}
 
 function connectWs() {
   console.log('[WS] Attempting connection...', { wsUrl, origin: window.location.origin });
@@ -74,6 +131,33 @@ function connectWs() {
         if (currentProfile) {
           send('identify', currentProfile);
         }
+      } else if (msg?.type === 'snapshot' && msg?.data) {
+        // private snapshot
+        gamePublic = {
+          roomId: msg.data.roomId,
+          players: msg.data.players || [],
+          topCard: msg.data.topCard || null,
+          currentPlayerId: msg.data.currentPlayerId || null,
+          phase: msg.data.phase || 'lobby',
+        };
+        yourHand = Array.isArray(msg.data.yourHand) ? msg.data.yourHand : [];
+        renderPlayers(gamePublic);
+        renderTable();
+      } else if (msg?.type === 'state_update' && msg?.data) {
+        // public update
+        gamePublic = {
+          roomId: msg.data.roomId,
+          players: msg.data.players || [],
+          topCard: msg.data.topCard || null,
+          currentPlayerId: msg.data.currentPlayerId || null,
+          phase: msg.data.phase || 'lobby',
+        };
+        renderPlayers(gamePublic);
+        renderTable();
+      } else if (msg?.type === 'winner' && msg?.data) {
+        gamePublic.phase = 'ended';
+        renderTable();
+        alert(msg.data.playerId === yourId ? 'You win!' : `Winner: ${msg.data.playerId}`);
       }
     } catch {
       // non-JSON messages
@@ -196,6 +280,7 @@ async function setupDiscordSdk() {
       discriminator: String(user.discriminator ?? '0'),
       avatarUrl,
     };
+    yourId = user.id;
     
     const sdkBadge = document.getElementById('sdk-badge');
     if (sdkBadge) sdkBadge.textContent = `SDK ready — ${auth.user.username}`;
@@ -223,10 +308,25 @@ document.querySelector('#app').innerHTML = `
         <button id="join-room">Join</button>
         <button id="leave-room">Leave</button>
         <button id="ping">Ping</button>
+        <button id="start-game">Start</button>
+        <button id="draw-card">Draw</button>
+        <button id="pass-turn">Pass</button>
       </div>
     </div>
     <div id="room-label" style="margin: 12px 0; font-size: 14px; opacity: .8;"></div>
     <div id="players" class="players-grid"></div>
+    <div style="margin-top:16px; display:flex; gap:16px; align-items:flex-start; justify-content:center; flex-wrap:wrap;">
+      <div>
+        <div style="margin-bottom:6px; opacity:.8;">Top card</div>
+        <div id="top-card" class="card-slot"></div>
+        <div id="turn-indicator" style="margin-top:8px; font-size:14px; opacity:.9;"></div>
+        <div id="players-count" style="margin-top:4px; font-size:12px; opacity:.7;"></div>
+      </div>
+      <div style="min-width:260px; max-width:600px;">
+        <div style="margin-bottom:6px; opacity:.8;">Your hand</div>
+        <div id="your-hand" class="hand-row"></div>
+      </div>
+    </div>
   </div>
 `;
 
@@ -270,4 +370,13 @@ document.getElementById('leave-room').addEventListener('click', () => {
 });
 document.getElementById('ping').addEventListener('click', () => {
   send('heartbeat', { now: Date.now() });
+});
+document.getElementById('start-game').addEventListener('click', () => {
+  send('start', {});
+});
+document.getElementById('draw-card').addEventListener('click', () => {
+  send('draw', {});
+});
+document.getElementById('pass-turn').addEventListener('click', () => {
+  send('pass', {});
 });
