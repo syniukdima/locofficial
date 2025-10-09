@@ -93,6 +93,8 @@ async function setupDiscordSdk() {
   console.log("Discord SDK is ready");
   const sdkBadge = document.getElementById('sdk-badge');
   if (sdkBadge) sdkBadge.textContent = 'SDK ready';
+  // Connect WS after SDK is ready (Discord iframe policies)
+  connectWs();
 }
 
 // Render UI
@@ -120,7 +122,6 @@ wsStatusEl = document.getElementById('ws-status');
 const wsUrlEl = document.getElementById('ws-url');
 if (wsUrlEl) wsUrlEl.textContent = wsUrl || '(not set)';
 setupDiscordSdk();
-connectWs();
 
 // Wire actions
 document.getElementById('create-room').addEventListener('click', () => {
