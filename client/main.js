@@ -1,8 +1,13 @@
 // Import the SDK
-import { DiscordSDK } from "@discord/embedded-app-sdk";
+import { DiscordSDK, patchUrlMappings } from "@discord/embedded-app-sdk";
 
 import "./style.css";
 import rocketLogo from '/rocket.png';
+
+// Patch URL mappings for WebSocket proxy (production only)
+if (import.meta.env.PROD) {
+  patchUrlMappings([{prefix: '/ws', target: 'locofficial.fly.dev'}]);
+}
 
 // Instantiate the SDK
 const discordSdk = new DiscordSDK(import.meta.env.VITE_DISCORD_CLIENT_ID);
@@ -115,7 +120,15 @@ function connectWs() {
     console.log('[WS] Closed', { code: ev.code, reason: ev.reason || reasonText, wasClean: ev.wasClean });
     updateWsStatus('closed');
     appendLog({ type: 'closed', code: ev.code, reason: ev.reason || reasonText });
-    // lightweight reconnect
+    
+    // Don't reconnect on 1006 - likely misconfiguration
+    if (ev.code === 1006) {
+      console.error('[WS] Code 1006 означає що Discord не може проксувати WebSocket. Перевір URL Mappings в Portal.');
+      updateWsStatus('error');
+      return;
+    }
+    
+    // lightweight reconnect for other errors
     setTimeout(() => {
       updateWsStatus('reconnecting');
       connectWs();
