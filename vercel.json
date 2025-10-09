@@ -1,0 +1,30 @@
+{
+  "version": 2,
+  "framework": null,
+  "builds": [
+    { "src": "client/index.html", "use": "@vercel/static-build", "config": { "distDir": "client/dist", "installCommand": "npm ci --prefix client", "buildCommand": "npm run --prefix client build" } },
+    { "src": "api/**/*.js", "use": "@vercel/node" }
+  ],
+  
+  "env": {
+    "VITE_DISCORD_CLIENT_ID": "",
+    "DISCORD_CLIENT_SECRET": ""
+  },
+  "build": {
+    "env": {
+      "VITE_DISCORD_CLIENT_ID": "@vite_discord_client_id",
+      "DISCORD_CLIENT_SECRET": "@discord_client_secret"
+    }
+  },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Content-Security-Policy", "value": "frame-ancestors https://discord.com https://*.discord.com;" },
+        { "key": "X-Frame-Options", "value": "ALLOW-FROM https://discord.com" }
+      ]
+    }
+  ]
+}
+
+
