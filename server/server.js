@@ -12,14 +12,6 @@ app.get("/health", (_req, res) => {
 
 const server = http.createServer(app);
 const port = process.env.PORT || 8080;
-const allowedOrigin = process.env.ALLOWED_ORIGIN;
-
-// Discord Activity domains that should be allowed
-const DISCORD_ORIGINS = [
-  'https://discord.com',
-  'https://ptb.discord.com',
-  'https://canary.discord.com'
-];
 
 const wss = new WebSocketServer({ server, path: "/ws" });
 
@@ -44,22 +36,9 @@ function createRoomId() {
   return Math.random().toString(36).slice(2, 6).toUpperCase();
 }
 
-function isOriginAllowed(origin) {
-  if (!origin) return false;
-  // Allow configured origin (Vercel) or Discord origins
-  if (allowedOrigin && origin === allowedOrigin) return true;
-  if (DISCORD_ORIGINS.includes(origin)) return true;
-  return false;
-}
-
 wss.on("connection", (socket, req) => {
-  const origin = req.headers.origin;
-  if (origin && !isOriginAllowed(origin)) {
-    console.log("WS connection rejected", { origin });
-    socket.close(1008, "origin not allowed");
-    return;
-  }
-  console.log("WS connection accepted", { origin });
+  const origin = req.headers.origin || 'unknown';
+  console.log("WS connection", { origin });
 
   send(socket, { type: "hello", message: "connected", now: Date.now() });
 
