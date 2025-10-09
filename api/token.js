@@ -5,13 +5,25 @@ export default async function handler(req, res) {
   }
 
   try {
-    const clientId = process.env.VITE_DISCORD_CLIENT_ID;
-    const clientSecret = process.env.DISCORD_CLIENT_SECRET;
+    // Try both with and without VITE_ prefix (Vercel compatibility)
+    const clientId = process.env.DISCORD_CLIENT_ID || process.env.VITE_DISCORD_CLIENT_ID;
+    const clientSecret = process.env.DISCORD_CLIENT_SECRET || process.env.VITE_DISCORD_CLIENT_SECRET;
     const body = typeof req.body === "string" ? safeJsonParse(req.body) : req.body;
     const code = body?.code;
 
     if (!clientId || !clientSecret) {
-      return res.status(500).json({ error: "Missing Discord client credentials" });
+      console.error('Missing env vars:', { 
+        hasClientId: !!clientId, 
+        hasSecret: !!clientSecret,
+        availableKeys: Object.keys(process.env).filter(k => k.includes('DISCORD'))
+      });
+      return res.status(500).json({ 
+        error: "Missing Discord client credentials",
+        debug: {
+          hasClientId: !!clientId,
+          hasSecret: !!clientSecret
+        }
+      });
     }
     if (!code) {
       return res.status(400).json({ error: "Missing authorization code" });
