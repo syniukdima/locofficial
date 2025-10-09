@@ -6,13 +6,13 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://localhost:3001',
+        target: 'http://localhost:8080',
         changeOrigin: true,
         secure: false,
         ws: true,
       },
       '/ws': {
-        target: 'ws://locofficial.fly.dev',
+        target: 'https://locofficial.fly.dev',
         changeOrigin: true,
         ws: true,
         rewrite: (path) => path.replace(/^\/ws/, '/ws'),

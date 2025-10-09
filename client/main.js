@@ -59,8 +59,8 @@ console.warn = function(...args) {
 
 let ws;
 let wsStatusEl;
-// Use relative path for patchUrlMappings to work
-let wsUrl = '/ws';
+// Prefer explicit env URL if provided, fallback to Discord-mapped relative path
+let wsUrl = import.meta.env.VITE_REALTIME_URL || '/ws';
 
 function connectWs() {
   // Debug logging
