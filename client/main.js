@@ -1,14 +1,12 @@
 // Import the SDK
-import { DiscordSDK, patchUrlMappings } from "@discord/embedded-app-sdk";
-
 import "./style.css";
 import rocketLogo from '/rocket.png';
+import { setupDiscordSdk } from './lib/sdk.js';
+import { connectWs, send, updateWsStatus } from './lib/ws.js';
+import { renderPlayers, renderTable, renderLobbyScreen, renderGameScreen } from './lib/ui.js';
+import { setGamePublic, setYourHand, getYourId, setView } from './lib/state.js';
 
-// Patch URL mappings for WebSocket proxy
-patchUrlMappings([{prefix: '/ws', target: 'locofficial.fly.dev'}]);
-
-// Instantiate the SDK
-const discordSdk = new DiscordSDK(import.meta.env.VITE_DISCORD_CLIENT_ID);
+// SDK is configured in lib/sdk
 
 // Simple ID generator for requests
 function generateRequestId() {
@@ -26,23 +24,20 @@ function renderPlayers(state) {
     const name = [p?.username, p?.discriminator && p.discriminator !== '0' ? `#${p.discriminator}` : '']
       .filter(Boolean).join(' ');
     const avatar = p?.avatarUrl || '';
+    const ready = p?.ready ? '✅' : '⏳';
     return (
       `<div class="player-card">` +
         `<img class="avatar" src="${avatar}" alt="${name}" />` +
         `<div class="player-name">${name || 'Unknown'}</div>` +
+        `<div class="player-meta">${ready}</div>` +
       `</div>`
     );
   }).join('');
 }
 
-let ws;
 let wsStatusEl;
 // Prefer explicit env URL if provided, fallback to Discord-mapped relative path
 let wsUrl = import.meta.env.VITE_REALTIME_URL || '/ws';
-let currentProfile = null;
-let yourId = null;
-let gamePublic = {};
-let yourHand = [];
 
 function canPlayClient(card, topCard) {
   if (!card || !topCard) return false;
@@ -98,110 +93,67 @@ function renderTable() {
   }
 }
 
-function connectWs() {
+function connectWsWrapper() {
   console.log('[WS] Attempting connection...', { wsUrl, origin: window.location.origin });
-  
-  if (!wsUrl) {
-    const msg = "VITE_REALTIME_URL не задано";
-    console.error('[WS]', msg);
-    updateWsStatus('missing-url');
-    return;
-  }
-  try {
-    console.log('[WS] Creating WebSocket:', wsUrl);
-    ws = new WebSocket(wsUrl);
-  } catch (e) {
-    const msg = `WS error: ${e?.message || e}`;
-    console.error('[WS]', msg, e);
-    updateWsStatus('error');
-    return;
-  }
-
-  ws.onopen = () => {
-    console.log('[WS] Connected!');
-    updateWsStatus('connected');
-  };
-
-  ws.onmessage = (ev) => {
+  connectWs((ev) => {
     try {
       const msg = JSON.parse(ev.data);
       if (msg?.type === 'room_update' && msg?.data) {
         renderPlayers(msg.data);
+        // Enable Start only for host and when all players ready and >= 2 players
+        try {
+          const startBtn = /** @type {HTMLButtonElement} */(document.getElementById('start-game'));
+          const players = Array.isArray(msg.data.players) ? msg.data.players : [];
+          const allReady = players.length >= 2 && players.every(p => !!p.ready);
+          const isHost = msg.data.hostId && msg.data.hostId === getYourId();
+          startBtn.disabled = !(isHost && allReady);
+        } catch {}
       } else if (msg?.type === 'joined' || msg?.type === 'room_created') {
-        if (currentProfile) {
-          send('identify', currentProfile);
-        }
+        // no-op; identify is sent by ws module on open
       } else if (msg?.type === 'snapshot' && msg?.data) {
         // private snapshot
-        gamePublic = {
+        const gamePublic = {
           roomId: msg.data.roomId,
           players: msg.data.players || [],
           topCard: msg.data.topCard || null,
           currentPlayerId: msg.data.currentPlayerId || null,
           phase: msg.data.phase || 'lobby',
         };
-        yourHand = Array.isArray(msg.data.yourHand) ? msg.data.yourHand : [];
-        renderPlayers(gamePublic);
-        renderTable();
+        setGamePublic(gamePublic);
+        setYourHand(Array.isArray(msg.data.yourHand) ? msg.data.yourHand : []);
+        if (gamePublic.phase === 'playing') {
+          setView('game');
+          renderGameScreen();
+        } else {
+          setView('lobby');
+          renderLobbyScreen();
+        }
       } else if (msg?.type === 'state_update' && msg?.data) {
         // public update
-        gamePublic = {
+        const gamePublic = {
           roomId: msg.data.roomId,
           players: msg.data.players || [],
           topCard: msg.data.topCard || null,
           currentPlayerId: msg.data.currentPlayerId || null,
           phase: msg.data.phase || 'lobby',
         };
-        renderPlayers(gamePublic);
-        renderTable();
+        setGamePublic(gamePublic);
+        if (gamePublic.phase === 'playing') {
+          setView('game');
+          renderGameScreen();
+        } else {
+          setView('lobby');
+          renderLobbyScreen();
+        }
       } else if (msg?.type === 'winner' && msg?.data) {
-        gamePublic.phase = 'ended';
-        renderTable();
-        alert(msg.data.playerId === yourId ? 'You win!' : `Winner: ${msg.data.playerId}`);
+        setGamePublic({ ...getGamePublic(), phase: 'ended' });
+        renderGameScreen();
+        alert(msg.data.playerId === getYourId() ? 'You win!' : `Winner: ${msg.data.playerId}`);
       }
     } catch {
       // non-JSON messages
     }
-  };
-
-  ws.onclose = (ev) => {
-    const closeReasons = {
-      1000: 'Normal closure',
-      1001: 'Going away',
-      1002: 'Protocol error',
-      1003: 'Unsupported data',
-      1006: 'Abnormal closure (no close frame)',
-      1007: 'Invalid frame payload',
-      1008: 'Policy violation',
-      1009: 'Message too big',
-      1010: 'Missing extension',
-      1011: 'Internal error',
-      1015: 'TLS handshake failure'
-    };
-    const reasonText = closeReasons[ev.code] || 'Unknown';
-    console.log('[WS] Closed', { code: ev.code, reason: ev.reason || reasonText, wasClean: ev.wasClean });
-    updateWsStatus('closed');
-    
-    // Don't reconnect on 1006 - likely misconfiguration
-    if (ev.code === 1006) {
-      console.error('[WS] Code 1006 означає що Discord не може проксувати WebSocket. Перевір URL Mappings в Portal.');
-      updateWsStatus('error');
-      return;
-    }
-    
-    // lightweight reconnect for other errors
-    setTimeout(() => {
-      updateWsStatus('reconnecting');
-      connectWs();
-    }, 1500);
-  };
-
-  ws.onerror = (ev) => {
-    console.error('[WS] Error event', ev);
-    console.error('[WS] WebSocket state:', ws.readyState);
-    console.error('[WS] URL:', ws.url);
-    updateWsStatus('error');
-  };
+  });
 }
 
 function updateWsStatus(state) {
@@ -271,6 +223,14 @@ async function setupDiscordSdk() {
 
     // Prepare profile for identify
     const user = auth.user;
+    // Try to get guild context (if available in Activity)
+    let guildId = null;
+    try {
+      const ctx = await discordSdk.commands.getInstanceConnectedParticipants();
+      // Fallback: try guild id from channel context if SDK provides
+      const channel = await discordSdk.commands.getChannel();
+      guildId = (channel && channel.guild_id) || null;
+    } catch {}
     const avatarUrl = user.avatar
       ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`
       : `https://cdn.discordapp.com/embed/avatars/${Number(user.discriminator || 0) % 5}.png`;
@@ -279,6 +239,7 @@ async function setupDiscordSdk() {
       username: user.username,
       discriminator: String(user.discriminator ?? '0'),
       avatarUrl,
+      guildId,
     };
     yourId = user.id;
     
@@ -299,7 +260,7 @@ document.querySelector('#app').innerHTML = `
     <img src="${rocketLogo}" class="logo" alt="Discord" />
     <h1>Hello, World!</h1>
     <div id="sdk-badge" style="margin: 4px 0; font-size: 12px; opacity: .8;">SDK initializing…</div>
-    <div style="margin: 8px 0;">
+    <div id="lobby-controls" style="margin: 8px 0;">
       <div>WS: <span id="ws-status">Connecting…</span></div>
       <div style="font-size:12px; opacity:.8;">URL: <code id="ws-url"></code></div>
       <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
@@ -308,19 +269,22 @@ document.querySelector('#app').innerHTML = `
         <button id="join-room">Join</button>
         <button id="leave-room">Leave</button>
         <button id="ping">Ping</button>
-        <button id="start-game">Start</button>
-        <button id="draw-card">Draw</button>
-        <button id="pass-turn">Pass</button>
+        <button id="ready-toggle">Ready</button>
+        <button id="start-game" disabled>Start</button>
       </div>
     </div>
     <div id="room-label" style="margin: 12px 0; font-size: 14px; opacity: .8;"></div>
     <div id="players" class="players-grid"></div>
-    <div style="margin-top:16px; display:flex; gap:16px; align-items:flex-start; justify-content:center; flex-wrap:wrap;">
+    <div id="game-screen" class="hidden" style="margin-top:16px; display:flex; gap:16px; align-items:flex-start; justify-content:center; flex-wrap:wrap;">
       <div>
         <div style="margin-bottom:6px; opacity:.8;">Top card</div>
         <div id="top-card" class="card-slot"></div>
         <div id="turn-indicator" style="margin-top:8px; font-size:14px; opacity:.9;"></div>
         <div id="players-count" style="margin-top:4px; font-size:12px; opacity:.7;"></div>
+        <div style="margin-top:8px; display:flex; gap:8px;">
+          <button id="draw-card">Draw</button>
+          <button id="pass-turn">Pass</button>
+        </div>
       </div>
       <div style="min-width:260px; max-width:600px;">
         <div style="margin-bottom:6px; opacity:.8;">Your hand</div>
@@ -353,9 +317,19 @@ console.log('🚀 Клієнт запустився');
 console.log('WebSocket URL:', wsUrl);
 console.log('CLIENT_ID:', import.meta.env.VITE_DISCORD_CLIENT_ID || 'НЕ ЗАДАНО');
 
-// No-op HTTP test removed
+// Heartbeat to keep connection and detect stalls
+setInterval(() => {
+  try {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      send('heartbeat', { now: Date.now() });
+    }
+  } catch {}
+}, 10000);
 
-setupDiscordSdk();
+setupDiscordSdk().then(() => connectWsWrapper()).catch(err => {
+  console.error('❌ Помилка Discord SDK:', err);
+  updateWsStatus('error');
+});
 
 // Wire actions
 document.getElementById('create-room').addEventListener('click', () => {
@@ -370,6 +344,14 @@ document.getElementById('leave-room').addEventListener('click', () => {
 });
 document.getElementById('ping').addEventListener('click', () => {
   send('heartbeat', { now: Date.now() });
+});
+document.getElementById('ready-toggle').addEventListener('click', (e) => {
+  const btn = /** @type {HTMLButtonElement} */(e.currentTarget);
+  const next = btn.dataset.state !== 'ready';
+  send('set_ready', { ready: next });
+  // optimistic UI toggle; server room_update остаточно підтвердить
+  btn.dataset.state = next ? 'ready' : 'not-ready';
+  btn.textContent = next ? 'Unready' : 'Ready';
 });
 document.getElementById('start-game').addEventListener('click', () => {
   send('start', {});

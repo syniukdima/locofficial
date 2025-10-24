@@ -3,6 +3,7 @@ import dotenv from "dotenv";
 import http from "http";
 import { WebSocketServer } from "ws";
 // Node 18+ has global fetch; if unavailable, consider installing node-fetch
+import { TURN_TIMEOUT_MS, HEARTBEAT_TIMEOUT_MS, PING_INTERVAL_MS } from "./lib/config.js";
 
 dotenv.config({ path: "../.env" });
 
@@ -55,7 +56,11 @@ const port = process.env.PORT || 8080;
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 // In-memory rooms and connections
-const rooms = new Map(); // roomId -> { players: Set<socket>, createdAt: number, game?: UnoGame }
+// rooms keyed by composite key `${guildId}:${shortId}` to avoid cross-guild collisions
+const rooms = new Map(); // roomKey -> { id: shortId, guildId: string, key: string, players: Set<socket>, createdAt: number, hostId?: string, readyById?: Set<string>, game?: UnoGame }
+// Reconnect support: map userId -> last joined roomKey
+const userIdToRoomId = new Map();
+// Timeouts and intervals from config
 
 // UNO helpers
 const COLORS = ["R", "G", "B", "Y"]; // red, green, blue, yellow
@@ -105,13 +110,14 @@ function ensureGame(room) {
       drawPile: [],
       discardTop: null,
       currentTurnIndex: 0,
+      lastTurnAt: 0,
     };
   }
   return room.game;
 }
 
 function buildPublicState(room) {
-  const state = getRoomState(room?.id || "");
+  const state = getRoomState(room?.key || "");
   if (room?.game) {
     state.topCard = room.game.discardTop;
     state.currentPlayerId = room.game.playersOrder[room.game.currentTurnIndex] || null;
@@ -136,9 +142,9 @@ function buildPrivateSnapshot(room, playerId) {
   };
 }
 
-function getRoomState(roomId) {
-  const room = rooms.get(roomId);
-  if (!room) return { roomId, players: [] };
+function getRoomState(roomKey) {
+  const room = rooms.get(roomKey);
+  if (!room) return { roomId: null, players: [] };
   const players = [];
   for (const s of room.players) {
     const p = s.__profile || {};
@@ -147,9 +153,10 @@ function getRoomState(roomId) {
       username: p.username || null,
       discriminator: p.discriminator || null,
       avatarUrl: p.avatarUrl || null,
+      ready: !!(room.readyById && p.id && room.readyById.has(p.id)),
     });
   }
-  return { roomId, players };
+  return { roomId: room.id, players, hostId: room.hostId || null };
 }
 
 function send(socket, message) {
@@ -158,16 +165,19 @@ function send(socket, message) {
   }
 }
 
-function broadcast(roomId, message) {
-  const room = rooms.get(roomId);
+function broadcast(roomKey, message) {
+  const room = rooms.get(roomKey);
   if (!room) return;
   for (const s of room.players) {
     send(s, message);
   }
 }
 
-function createRoomId() {
-  return Math.random().toString(36).slice(2, 6).toUpperCase();
+function createShortRoomId() {
+  return Math.random().toString(36).slice(2, 8).toUpperCase(); // 6 chars
+}
+function makeRoomKey(guildId, shortId) {
+  return `${guildId}:${shortId}`;
 }
 
 wss.on("connection", (socket, req) => {
@@ -175,6 +185,10 @@ wss.on("connection", (socket, req) => {
   console.log("WS connection", { origin });
 
   send(socket, { type: "hello", message: "connected", now: Date.now() });
+
+  // Track low-level ping/pong for liveness
+  socket.__lastPong = Date.now();
+  socket.on('pong', () => { socket.__lastPong = Date.now(); });
 
   socket.on("message", (raw) => {
     let msg;
@@ -194,19 +208,34 @@ wss.on("connection", (socket, req) => {
 
     // Create room
     if (type === "create_room") {
-      const roomId = createRoomId();
-      rooms.set(roomId, { players: new Set([socket]), createdAt: Date.now(), id: roomId });
-      socket.__roomId = roomId;
-      send(socket, { type: "room_created", requestId, data: { roomId } });
-      const state = getRoomState(roomId);
-      broadcast(roomId, { type: "room_update", data: state });
+      const guildId = socket.__guildId;
+      if (!guildId) { send(socket, { type: "error", requestId, error: "missing_guild" }); return; }
+      let shortId;
+      let key;
+      do {
+        shortId = createShortRoomId();
+        key = makeRoomKey(guildId, shortId);
+      } while (rooms.has(key));
+      rooms.set(key, { id: shortId, guildId, key, players: new Set([socket]), createdAt: Date.now(), hostId: getPlayerId(socket), readyById: new Set() });
+      socket.__roomKey = key;
+      send(socket, { type: "room_created", requestId, data: { roomId: shortId } });
+      const state = getRoomState(key);
+      broadcast(key, { type: "room_update", data: state });
+      // If already identified, remember mapping for auto-rejoin
+      const uid = getPlayerId(socket);
+      if (uid && !uid.startsWith('anon-')) {
+        userIdToRoomId.set(uid, key);
+      }
       return;
     }
 
     // Join room
     if (type === "join_room") {
-      const roomId = (data && data.roomId || "").toString().trim();
-      const room = rooms.get(roomId);
+      const shortId = (data && data.roomId || "").toString().trim();
+      const guildId = socket.__guildId;
+      if (!guildId) { send(socket, { type: "error", requestId, error: "missing_guild" }); return; }
+      const key = makeRoomKey(guildId, shortId);
+      const room = rooms.get(key);
       if (!room) {
         send(socket, { type: "error", requestId, error: "room_not_found" });
         return;
@@ -217,22 +246,32 @@ wss.on("connection", (socket, req) => {
         return;
       }
       room.players.add(socket);
-      socket.__roomId = roomId;
-      send(socket, { type: "joined", requestId, data: { roomId } });
-      const state = getRoomState(roomId);
-      broadcast(roomId, { type: "room_update", data: state });
+      socket.__roomKey = key;
+      send(socket, { type: "joined", requestId, data: { roomId: shortId } });
+      const state = getRoomState(key);
+      broadcast(key, { type: "room_update", data: state });
+      // If identified, remember mapping for auto-rejoin
+      const uid = getPlayerId(socket);
+      if (uid && !uid.startsWith('anon-')) {
+        userIdToRoomId.set(uid, key);
+      }
       return;
     }
 
     // Leave room
     if (type === "leave_room") {
-      const roomId = socket.__roomId;
-      if (roomId && rooms.has(roomId)) {
-        const room = rooms.get(roomId);
+      const roomKey = socket.__roomKey;
+      if (roomKey && rooms.has(roomKey)) {
+        const room = rooms.get(roomKey);
         room.players.delete(socket);
-        delete socket.__roomId;
-        send(socket, { type: "left", requestId, data: { roomId } });
-        if (room.players.size === 0) rooms.delete(roomId);
+        delete socket.__roomKey;
+        send(socket, { type: "left", requestId, data: { roomId: room.id } });
+        // Voluntary leave: clear mapping so we don't auto-rejoin
+        const uid = getPlayerId(socket);
+        if (uid && userIdToRoomId.get(uid) === roomKey) {
+          userIdToRoomId.delete(uid);
+        }
+        if (room.players.size === 0) rooms.delete(roomKey);
         else {
           // if playing, remove from order and adjust turn
           if (room.game && room.game.phase === "playing") {
@@ -252,14 +291,14 @@ wss.on("connection", (socket, req) => {
               }
             }
           }
-          const state = getRoomState(roomId);
-          broadcast(roomId, { type: "room_update", data: state });
+          const state = getRoomState(roomKey);
+          broadcast(roomKey, { type: "room_update", data: state });
         }
       }
       return;
     }
 
-    // Identify: store user profile on socket and broadcast state
+    // Identify: store user profile (and guild) on socket and broadcast state
     if (type === "identify") {
       const profile = data && typeof data === 'object' ? data : {};
       socket.__profile = {
@@ -268,21 +307,80 @@ wss.on("connection", (socket, req) => {
         discriminator: profile.discriminator || null,
         avatarUrl: profile.avatarUrl || null,
       };
+      if (profile.guildId) socket.__guildId = profile.guildId;
       send(socket, { type: "identify_ack", requestId });
-      const roomId = socket.__roomId;
-      if (roomId && rooms.has(roomId)) {
-        const state = getRoomState(roomId);
-        broadcast(roomId, { type: "room_update", data: state });
+      const roomKey = socket.__roomKey;
+      // If already in a room, remember mapping and send updates
+      if (roomKey && rooms.has(roomKey)) {
+        if (profile.id) userIdToRoomId.set(profile.id, roomKey);
+        const room = rooms.get(roomKey);
+        // If hostId is anon placeholder, upgrade to real id
+        if (room && (!room.hostId || room.hostId.startsWith('anon-')) && profile.id) {
+          room.hostId = profile.id;
+        }
+        const state = getRoomState(roomKey);
+        broadcast(roomKey, { type: "room_update", data: state });
+        // If game is active, send private snapshot to this user
+        if (room.game && room.game.phase) {
+          send(socket, buildPrivateSnapshot(room, getPlayerId(socket)));
+          broadcast(roomKey, { type: "state_update", data: buildPublicState(room) });
+        }
+      } else {
+        // Auto-rejoin: if we have a remembered room for this user
+        const rememberedKey = profile.id && userIdToRoomId.get(profile.id);
+        if (rememberedKey && rooms.has(rememberedKey)) {
+          const room = rooms.get(rememberedKey);
+          // prevent cross-guild auto-pull if guildId provided and mismatched
+          if (profile.guildId && profile.guildId !== room.guildId) {
+            return;
+          }
+          room.players.add(socket);
+          socket.__roomKey = rememberedKey;
+          if (!socket.__guildId) socket.__guildId = room.guildId;
+          send(socket, { type: "joined", requestId, data: { roomId: room.id } });
+          const state = getRoomState(rememberedKey);
+          broadcast(rememberedKey, { type: "room_update", data: state });
+          // If game in progress, deliver snapshots/state
+          if (room.game && room.game.phase) {
+            send(socket, buildPrivateSnapshot(room, getPlayerId(socket)));
+            broadcast(rememberedKey, { type: "state_update", data: buildPublicState(room) });
+          }
+        }
       }
+      return;
+    }
+
+    // Lobby: set_ready { ready: boolean }
+    if (type === "set_ready") {
+      const roomKey = socket.__roomKey;
+      const room = roomKey && rooms.get(roomKey);
+      if (!room) { send(socket, { type: "error", requestId, error: "not_in_room" }); return; }
+      const pid = getPlayerId(socket);
+      if (!pid || pid.startsWith('anon-')) { send(socket, { type: "error", requestId, error: "not_identified" }); return; }
+      if (!room.readyById) room.readyById = new Set();
+      const isReady = !!(data && data.ready);
+      if (isReady) room.readyById.add(pid); else room.readyById.delete(pid);
+      // Broadcast updated lobby state with ready flags
+      const state = getRoomState(roomKey);
+      broadcast(roomKey, { type: "room_update", data: state });
+      send(socket, { type: "set_ready_ack", requestId, data: { ready: isReady } });
       return;
     }
 
     // === UNO GAME HANDLERS ===
     if (type === "start") {
-      const roomId = socket.__roomId;
-      const room = roomId && rooms.get(roomId);
+      const roomKey = socket.__roomKey;
+      const room = roomKey && rooms.get(roomKey);
       if (!room) { send(socket, { type: "error", requestId, error: "not_in_room" }); return; }
+      const pid = getPlayerId(socket);
+      if (!room.hostId || room.hostId !== pid) { send(socket, { type: "error", requestId, error: "not_host" }); return; }
       if (room.players.size < 2) { send(socket, { type: "error", requestId, error: "need_2_players" }); return; }
+      // All identified players must be ready
+      const allReady = Array.from(room.players).every(s => {
+        const id = getPlayerId(s);
+        return id && !id.startsWith('anon-') && room.readyById && room.readyById.has(id);
+      });
+      if (!allReady) { send(socket, { type: "error", requestId, error: "not_all_ready" }); return; }
 
       const game = ensureGame(room);
       if (game.phase === "playing") { send(socket, { type: "error", requestId, error: "already_started" }); return; }
@@ -294,6 +392,7 @@ wss.on("connection", (socket, req) => {
       game.drawPile = shuffleInPlace(createDeck());
       game.discardTop = null;
       game.currentTurnIndex = 0;
+      game.lastTurnAt = Date.now();
 
       // deal 7 to each
       for (const pid of game.playersOrder) {
@@ -313,13 +412,13 @@ wss.on("connection", (socket, req) => {
         send(s, buildPrivateSnapshot(room, getPlayerId(s)));
       }
       // broadcast public state
-      broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
+      broadcast(roomKey, { type: "state_update", data: buildPublicState(room) });
       return;
     }
 
     if (type === "play") {
-      const roomId = socket.__roomId;
-      const room = roomId && rooms.get(roomId);
+      const roomKey = socket.__roomKey;
+      const room = roomKey && rooms.get(roomKey);
       if (!room || !room.game || room.game.phase !== "playing") { send(socket, { type: "error", requestId, error: "not_playing" }); return; }
       const pid = getPlayerId(socket);
       const game = room.game;
@@ -342,19 +441,20 @@ wss.on("connection", (socket, req) => {
       } else {
         // advance turn
         game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playersOrder.length;
+        game.lastTurnAt = Date.now();
       }
 
       // notify
       for (const s of room.players) {
         send(s, buildPrivateSnapshot(room, getPlayerId(s)));
       }
-      broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
+      broadcast(roomKey, { type: "state_update", data: buildPublicState(room) });
       return;
     }
 
     if (type === "draw") {
-      const roomId = socket.__roomId;
-      const room = roomId && rooms.get(roomId);
+      const roomKey = socket.__roomKey;
+      const room = roomKey && rooms.get(roomKey);
       if (!room || !room.game || room.game.phase !== "playing") { send(socket, { type: "error", requestId, error: "not_playing" }); return; }
       const pid = getPlayerId(socket);
       const game = room.game;
@@ -365,29 +465,32 @@ wss.on("connection", (socket, req) => {
       const card = game.drawPile.pop();
       const hand = game.hands.get(pid) || [];
       hand.push(card);
+      // Extend time budget for current player upon action
+      game.lastTurnAt = Date.now();
 
       // send updated snapshots/public
       for (const s of room.players) {
         send(s, buildPrivateSnapshot(room, getPlayerId(s)));
       }
-      broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
+      broadcast(roomKey, { type: "state_update", data: buildPublicState(room) });
       return;
     }
 
     if (type === "pass") {
-      const roomId = socket.__roomId;
-      const room = roomId && rooms.get(roomId);
+      const roomKey = socket.__roomKey;
+      const room = roomKey && rooms.get(roomKey);
       if (!room || !room.game || room.game.phase !== "playing") { send(socket, { type: "error", requestId, error: "not_playing" }); return; }
       const pid = getPlayerId(socket);
       const game = room.game;
       if (game.playersOrder[game.currentTurnIndex] !== pid) { send(socket, { type: "error", requestId, error: "not_your_turn" }); return; }
       // advance turn
       game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playersOrder.length;
+      game.lastTurnAt = Date.now();
 
       for (const s of room.players) {
         send(s, buildPrivateSnapshot(room, getPlayerId(s)));
       }
-      broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
+      broadcast(roomKey, { type: "state_update", data: buildPublicState(room) });
       return;
     }
 
@@ -402,15 +505,51 @@ wss.on("connection", (socket, req) => {
   });
   socket.on("close", (code, reason) => {
     console.log("WS close", { code, reason: reason?.toString?.() || "" });
-    const roomId = socket.__roomId;
-    if (roomId && rooms.has(roomId)) {
-      const room = rooms.get(roomId);
+    const roomKey = socket.__roomKey;
+    if (roomKey && rooms.has(roomKey)) {
+      const room = rooms.get(roomKey);
       room.players.delete(socket);
-      if (room.players.size === 0) rooms.delete(roomId);
-      else broadcast(roomId, { type: "room_update", data: { roomId, players: room.players.size } });
+      if (room.players.size === 0) rooms.delete(roomKey);
+      else {
+        const state = getRoomState(roomKey);
+        broadcast(roomKey, { type: "room_update", data: state });
+      }
     }
   });
 });
+
+// Global ping/pong and liveness checks
+if (!wss.__pingInterval) {
+  wss.__pingInterval = setInterval(() => {
+    for (const s of wss.clients) {
+      try { s.ping(); } catch {}
+      const last = s.__lastPong || 0;
+      if (Date.now() - last > HEARTBEAT_TIMEOUT_MS) {
+        try { s.terminate(); } catch {}
+      }
+    }
+  }, PING_INTERVAL_MS);
+}
+
+// Turn timeout auto-pass
+if (!wss.__turnInterval) {
+  wss.__turnInterval = setInterval(() => {
+    for (const [roomId, room] of rooms.entries()) {
+      const game = room.game;
+      if (!game || game.phase !== 'playing') continue;
+      if (!Array.isArray(game.playersOrder) || game.playersOrder.length < 2) continue;
+      const last = game.lastTurnAt || Date.now();
+      if (Date.now() - last > TURN_TIMEOUT_MS) {
+        game.currentTurnIndex = (game.currentTurnIndex + 1) % game.playersOrder.length;
+        game.lastTurnAt = Date.now();
+        for (const s of room.players) {
+          send(s, buildPrivateSnapshot(room, getPlayerId(s)));
+        }
+        broadcast(roomId, { type: "state_update", data: buildPublicState(room) });
+      }
+    }
+  }, 1000);
+}
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`HTTP on :${port} (GET /health), WS on ws://0.0.0.0:${port}/ws`);
