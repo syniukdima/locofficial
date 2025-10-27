@@ -3,7 +3,7 @@ import "./style.css";
 import rocketLogo from '/rocket.png';
 import { setupDiscordSdk } from './lib/sdk.js';
 import { connectWs, send, updateWsStatus } from './lib/ws.js';
-import { renderPlayers, renderTable, renderLobbyScreen, renderGameScreen } from './lib/ui.js';
+import { renderPlayers, renderLobbyScreen, renderGameScreen } from './lib/ui.js';
 import { setGamePublic, setYourHand, getYourId, setView } from './lib/state.js';
 
 // SDK is configured in lib/sdk
@@ -11,28 +11,6 @@ import { setGamePublic, setYourHand, getYourId, setView } from './lib/state.js';
 // Simple ID generator for requests
 function generateRequestId() {
   return Math.random().toString(36).slice(2, 10);
-}
-
-// UI helpers
-function renderPlayers(state) {
-  const container = document.getElementById('players');
-  const roomLabel = document.getElementById('room-label');
-  if (!container) return;
-  const players = Array.isArray(state?.players) ? state.players : [];
-  if (roomLabel) roomLabel.textContent = state?.roomId ? `Room: ${state.roomId}` : '';
-  container.innerHTML = players.map((p) => {
-    const name = [p?.username, p?.discriminator && p.discriminator !== '0' ? `#${p.discriminator}` : '']
-      .filter(Boolean).join(' ');
-    const avatar = p?.avatarUrl || '';
-    const ready = p?.ready ? '✅' : '⏳';
-    return (
-      `<div class="player-card">` +
-        `<img class="avatar" src="${avatar}" alt="${name}" />` +
-        `<div class="player-name">${name || 'Unknown'}</div>` +
-        `<div class="player-meta">${ready}</div>` +
-      `</div>`
-    );
-  }).join('');
 }
 
 let wsStatusEl;
@@ -156,104 +134,6 @@ function connectWsWrapper() {
   });
 }
 
-function updateWsStatus(state) {
-  if (!wsStatusEl) return;
-  const map = {
-    connected: 'Connected',
-    reconnecting: 'Reconnecting…',
-    closed: 'Closed',
-    error: 'Error',
-    'missing-url': 'Missing VITE_REALTIME_URL',
-  };
-  wsStatusEl.textContent = map[state] || state;
-}
-
-function send(type, data) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    console.warn('WS not connected');
-    return;
-  }
-  const requestId = generateRequestId();
-  ws.send(JSON.stringify({ type, requestId, data }));
-}
-
-async function setupDiscordSdk() {
-  console.log('📡 Ініціалізація Discord SDK...');
-  try {
-    await discordSdk.ready();
-    console.log("✅ Discord SDK готовий!");
-    
-    // IMPORTANT: Must authenticate before external network requests!
-    console.log('🔐 Авторизація користувача...');
-    
-    // Exchange code for access token via your backend
-    const { code } = await discordSdk.commands.authorize({
-      client_id: import.meta.env.VITE_DISCORD_CLIENT_ID,
-      response_type: "code",
-      state: "",
-      prompt: "none",
-      scope: ["identify", "guilds"],
-    });
-    
-    console.log('📝 Отримано код авторизації:', code?.substring(0, 10) + '...');
-    
-    // Exchange code for token via your serverless function
-    const response = await fetch("/api/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
-    });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(`Token exchange failed: ${errorData.error || response.statusText}`);
-    }
-    
-    const { access_token } = await response.json();
-    
-    if (!access_token) {
-      throw new Error('No access_token in response');
-    }
-    
-    console.log('🎟️ Отримано access token');
-    
-    // Authenticate with Discord SDK
-    const auth = await discordSdk.commands.authenticate({ access_token });
-    console.log('👤 Авторизовано:', auth.user.username, '#' + auth.user.discriminator);
-
-    // Prepare profile for identify
-    const user = auth.user;
-    // Try to get guild context (if available in Activity)
-    let guildId = null;
-    try {
-      const ctx = await discordSdk.commands.getInstanceConnectedParticipants();
-      // Fallback: try guild id from channel context if SDK provides
-      const channel = await discordSdk.commands.getChannel();
-      guildId = (channel && channel.guild_id) || null;
-    } catch {}
-    const avatarUrl = user.avatar
-      ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=128`
-      : `https://cdn.discordapp.com/embed/avatars/${Number(user.discriminator || 0) % 5}.png`;
-    currentProfile = {
-      id: user.id,
-      username: user.username,
-      discriminator: String(user.discriminator ?? '0'),
-      avatarUrl,
-      guildId,
-    };
-    yourId = user.id;
-    
-    const sdkBadge = document.getElementById('sdk-badge');
-    if (sdkBadge) sdkBadge.textContent = `SDK ready — ${auth.user.username}`;
-    
-    // NOW we can connect to external WebSocket!
-    console.log('🔓 Авторизація завершена, підключаємось до WS...');
-    connectWs();
-  } catch (error) {
-    console.error('❌ Помилка Discord SDK:', error);
-  }
-}
-
 // Render UI
 document.querySelector('#app').innerHTML = `
   <div>
@@ -319,11 +199,7 @@ console.log('CLIENT_ID:', import.meta.env.VITE_DISCORD_CLIENT_ID || 'НЕ ЗАД
 
 // Heartbeat to keep connection and detect stalls
 setInterval(() => {
-  try {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      send('heartbeat', { now: Date.now() });
-    }
-  } catch {}
+  try { send('heartbeat', { now: Date.now() }); } catch {}
 }, 10000);
 
 setupDiscordSdk().then(() => connectWsWrapper()).catch(err => {
