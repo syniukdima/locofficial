@@ -5,6 +5,7 @@ import { setupDiscordSdk } from './lib/sdk.js';
 import { connectWs, send, updateWsStatus } from './lib/ws.js';
 import { renderPlayers, renderLobbyScreen, renderGameScreen } from './lib/ui.js';
 import { setGamePublic, setYourHand, getYourId, setView } from './lib/state.js';
+import { setupDebugOverlay } from './lib/debug.js';
 
 // SDK is configured in lib/sdk
 
@@ -187,6 +188,9 @@ window.addEventListener('error', (e) => {
 console.log('🚀 Клієнт запустився');
 console.log('WebSocket URL:', wsUrl);
 console.log('CLIENT_ID:', import.meta.env.VITE_DISCORD_CLIENT_ID || 'НЕ ЗАДАНО');
+
+// Debug overlay (controlled by VITE_DEBUG_OVERLAY; default ON when unset)
+try { setupDebugOverlay(); } catch {}
 
 // Heartbeat to keep connection and detect stalls
 setInterval(() => {
