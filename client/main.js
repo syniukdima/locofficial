@@ -1,10 +1,10 @@
 // Import the SDK
 import "./style.css";
 import rocketLogo from '/rocket.png';
-import { setupDiscordSdk } from './lib/sdk.js';
+import { setupDiscordSdk, authenticateAndLoadProfile } from './lib/sdk.js';
 import { connectWs, send, updateWsStatus } from './lib/ws.js';
 import { renderPlayers, renderLobbyScreen, renderGameScreen } from './lib/ui.js';
-import { setGamePublic, setYourHand, getYourId, setView } from './lib/state.js';
+import { setGamePublic, setYourHand, getYourId, getCurrentProfile, setView } from './lib/state.js';
 import { setupDebugOverlay } from './lib/debug.js';
 
 // SDK is configured in lib/sdk
@@ -139,7 +139,6 @@ function connectWsWrapper() {
 document.querySelector('#app').innerHTML = `
   <div>
     <img src="${rocketLogo}" class="logo" alt="Discord" />
-    <h1>Hello, World!</h1>
     <div id="sdk-badge" style="margin: 4px 0; font-size: 12px; opacity: .8;">SDK initializing…</div>
     <div id="lobby-controls" style="margin: 8px 0;">
       <div>WS: <span id="ws-status">Connecting…</span></div>
@@ -192,15 +191,22 @@ console.log('CLIENT_ID:', import.meta.env.VITE_DISCORD_CLIENT_ID || 'НЕ ЗАД
 // Debug overlay (controlled by VITE_DEBUG_OVERLAY; default ON when unset)
 try { setupDebugOverlay(); } catch {}
 
-// Heartbeat to keep connection and detect stalls
-setInterval(() => {
-  try { send('heartbeat', { now: Date.now() }); } catch {}
-}, 10000);
+async function init() {
+  try {
+    await setupDiscordSdk();
+    const p = await authenticateAndLoadProfile();
+    try {
+      const sdkBadge = document.getElementById('sdk-badge');
+      if (sdkBadge) sdkBadge.textContent = `SDK ready — ${p?.username || 'user'}`;
+    } catch {}
+    connectWsWrapper();
+  } catch (err) {
+    console.error('❌ Помилка Discord SDK:', err);
+    updateWsStatus('error');
+  }
+}
 
-setupDiscordSdk().then(() => connectWsWrapper()).catch(err => {
-  console.error('❌ Помилка Discord SDK:', err);
-  updateWsStatus('error');
-});
+init();
 
 // Wire actions
 document.getElementById('create-room').addEventListener('click', () => {

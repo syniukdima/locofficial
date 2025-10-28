@@ -30,17 +30,19 @@ export function connectWs(onMessage) {
   setWs(ws);
 
   ws.onopen = () => {
+    console.log('[WS] Connected event');
     updateWsStatus('connected');
     const profile = getCurrentProfile();
     if (profile) { send('identify', profile); }
   };
   ws.onmessage = onMessage;
   ws.onclose = (ev) => {
+    console.log('[WS] Closed', { code: ev.code, reason: ev.reason, wasClean: ev.wasClean });
     updateWsStatus('closed');
     if (ev.code === 1006) { updateWsStatus('error'); return; }
     setTimeout(() => { updateWsStatus('reconnecting'); connectWs(onMessage); }, 1500);
   };
-  ws.onerror = () => { updateWsStatus('error'); };
+  ws.onerror = (ev) => { console.error('[WS] Error event', ev); updateWsStatus('error'); };
 }
 
 
