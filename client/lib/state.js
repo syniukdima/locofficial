@@ -6,7 +6,6 @@ let gamePublic = {};
 let yourHand = [];
 let sender = null;
 let view = 'lobby'; // 'lobby' | 'game'
-let view = 'lobby'; // 'lobby' | 'game'
 
 export function getWs() { return ws; }
 export function setWs(v) { ws = v; }
@@ -28,9 +27,6 @@ export function setYourHand(v) { yourHand = Array.isArray(v) ? v : []; }
 
 export function setSender(fn) { sender = fn; }
 export function getSender() { return sender; }
-
-export function getView() { return view; }
-export function setView(v) { view = v; }
 
 export function getView() { return view; }
 export function setView(v) { view = v; }
