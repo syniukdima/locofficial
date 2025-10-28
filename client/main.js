@@ -178,15 +178,6 @@ wsStatusEl = document.getElementById('ws-status');
 const wsUrlEl = document.getElementById('ws-url');
 if (wsUrlEl) wsUrlEl.textContent = wsUrl || '(not set)';
 
-// Catch CSP violations and other security errors
-window.addEventListener('securitypolicyviolation', (e) => {
-  console.error('🚨 CSP Violation!', {
-    blockedURI: e.blockedURI,
-    violatedDirective: e.violatedDirective,
-    originalPolicy: e.originalPolicy
-  });
-});
-
 // Catch all unhandled errors
 window.addEventListener('error', (e) => {
   console.error('❌ Global error:', e.message, e.error);
